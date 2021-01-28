@@ -1,0 +1,15 @@
+{
+    "name": "serverless-observability",
+    "description": "app demonstrating how to monitor,trace ....",
+    "version": "0.0.1",
+    "private": true,
+    "dependencies": {
+        "aws-sdk": "^2.683.0",
+        "aws-embedded-metrics": "^2.0.0",
+        "aws-xray-sdk-core": "^3.0.1",
+        "lambda-log": "^2.4.0",
+        "lodash": "^4.17.15",
+        "uuid": "^8.1.0",
+        "async-retry": "^1.2.3"
+    }
+}

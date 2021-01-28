@@ -1,0 +1,200 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: >-
+  serverless-observability
+
+Transform:
+- AWS::Serverless-2016-10-31
+
+Globals:
+  Function:
+    Runtime: nodejs12.x
+    Timeout: 100
+    Tracing: Active
+    MemorySize: 128
+    CodeUri: ./
+    Environment:
+      Variables:
+        APP_NAME: !Ref SampleTable
+        SAMPLE_TABLE: !Ref SampleTable
+        SERVICE_NAME: itemService
+        ENABLE_DEBUG: false
+        # Enable usage of KeepAlive to reduce overhead of short-lived actions, like DynamoDB queries
+        AWS_NODEJS_CONNECTION_REUSE_ENABLED: 1
+        AWS_EMF_NAMESPACE: ObservApp
+    Layers:                                                                                 
+      - !Sub "arn:aws:lambda:${AWS::Region}:580247275435:layer:LambdaInsightsExtension:14"  
+  Api:
+    TracingEnabled: true
+Resources:
+# API Gateway
+  Api: 
+    Type: AWS::Serverless::Api
+    DependsOn: CWRoleArn
+    Properties:
+      StageName: Prod
+      AccessLogSetting:
+        DestinationArn: !Sub ${ApiAccessLogGroup.Arn} 
+        Format: "{ 'requestId':'$context.requestId', 'ip': '$context.identity.sourceIp', 'caller':'$context.identity.caller', 'user':'$context.identity.user','requestTime':'$context.requestTime', 'xrayTraceId':'$context.xrayTraceId', 'wafResponseCode':'$context.wafResponseCode', 'httpMethod':'$context.httpMethod','resourcePath':'$context.resourcePath', 'status':'$context.status','protocol':'$context.protocol', 'responseLength':'$context.responseLength' }"
+      MethodSettings:
+        - MetricsEnabled: True
+          ResourcePath: '/*'
+          HttpMethod: '*'
+
+  CWRoleArn:
+    Type: AWS::ApiGateway::Account
+    Properties: 
+      CloudWatchRoleArn: !GetAtt CloudWatchRole.Arn
+      
+      
+# IAM Role for API Gateway to write to CloudWatch
+  CloudWatchRole:
+      Type: AWS::IAM::Role
+      Properties:
+        AssumeRolePolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+            Action: 'sts:AssumeRole'
+            Effect: Allow
+            Principal:
+              Service: apigateway.amazonaws.com
+        Path: /
+        ManagedPolicyArns:
+          - 'arn:aws:iam::aws:policy/service-role/AmazonAPIGatewayPushToCloudWatchLogs'
+
+
+# Lambda Functions
+  getAllItemsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: src/handlers/getAllItems.getAllItemsHandler
+      Description: A HTTP get method to get all items from a DynamoDB table.
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref SampleTable
+        - CloudWatchPutMetricPolicy: {}
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            RestApiId: !Ref Api
+            Path: /items
+            Method: GET
+            
+  getByIdFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: src/handlers/getById.getByIdHandler
+      Description: A HTTP get method to get one item by id from a DynamoDB table.
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref SampleTable
+        - CloudWatchPutMetricPolicy: {}
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            RestApiId: !Ref Api
+            Path: /items/{id}
+            Method: GET
+            
+  putItemFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: src/handlers/putItem.putItemHandler
+      Description: A HTTP post method to add one item to a DynamoDB table.
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref SampleTable
+        - SNSPublishMessagePolicy:
+            TopicName: !Sub ${NewItemTopic.TopicName}
+        - CloudWatchPutMetricPolicy: {}
+      Environment:
+        Variables:
+          TOPIC_NAME: !Ref NewItemTopic
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            RestApiId: !Ref Api
+            Path: /items
+            Method: POST
+
+  notifiyNewItemFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: src/handlers/notifyNewItem.notifiyNewItemHandler
+      Description: A simple example that is triggered by a SNS message to notify of a new item insertion.
+      Events:
+        TopicListener:
+          Type: SNS
+          Properties:
+            Topic: !Ref NewItemTopic
+            FilterPolicy:
+              Status:
+                - Success
+  ProcessLogAndMetricsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: src/handlers/index.handler
+      Description: Lambda function to parse logs from Kinesis Stream and either publish as CloudWatch Custom Metric or index logs on Elasticsearch.
+      Runtime: nodejs12.x
+      Timeout: 100
+      Tracing: Active
+      MemorySize: 1024
+      Environment:
+        Variables:
+          ENABLE_DEBUG: false
+          RECORD_LAMBDA_COLD_START_METRIC: true
+          RECORD_LAMBDA_COST_METRIC: true
+      Policies:
+        - CloudWatchPutMetricPolicy: {}
+# SNS Topic
+  NewItemTopic:
+    Type: AWS::SNS::Topic
+
+# DynamoDB Table            
+  SampleTable:
+    Type: AWS::Serverless::SimpleTable
+    Properties:
+      PrimaryKey:
+        Name: id
+        Type: String
+# CloudWatch Logs - Log Groups
+  ApiAccessLogGroup:
+    Type: AWS::Logs::LogGroup
+    DependsOn: Api
+    Properties:
+      LogGroupName: !Sub /aws/apigateway/${Api}
+      RetentionInDays: 7
+  
+  GetByIdLogGroup:
+    Type: AWS::Logs::LogGroup
+    DependsOn: getByIdFunction
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${getByIdFunction}
+      RetentionInDays: 7
+
+  GetAllItemsLogGroup:
+    Type: AWS::Logs::LogGroup
+    DependsOn: getAllItemsFunction
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${getAllItemsFunction}
+      RetentionInDays: 7
+
+  PutItemLogGroup:
+    Type: AWS::Logs::LogGroup
+    DependsOn: putItemFunction
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${putItemFunction}
+      RetentionInDays: 7
+
+  NotifyItemLogGroup:
+    Type: AWS::Logs::LogGroup
+    DependsOn: notifiyNewItemFunction
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${notifiyNewItemFunction}
+      RetentionInDays: 7        
+Outputs:
+  ApiUrl:
+    Description: "API Gateway endpoint URL for Prod stage"
+    Value: !Sub "https://${Api}.execute-api.${AWS::Region}.amazonaws.com/Prod/"
